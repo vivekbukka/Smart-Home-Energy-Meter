@@ -1,0 +1,152 @@
+from machine import Pin, ADC, I2C, PWM
+from ssd1306 import SSD1306_I2C
+import neopixel
+import time
+
+# OLED Display setup (assumes SDA=GP0, SCL=GP1)
+i2c = I2C(0, scl=Pin(1), sda=Pin(0))
+oled = SSD1306_I2C(128, 64, i2c)
+
+# ADC Inputs for slide potentiometers
+voltage_adc = ADC(26)  # Slide Pot 1 for Voltage
+current_adc = ADC(27)  # Slide Pot 2 for Current
+
+# Output Pins
+led = Pin(15, Pin.OUT)
+buzzer_pwm = PWM(Pin(14))  # PWM for buzzer
+relay = Pin(16, Pin.OUT)   # Relay for load control (LED ring power)
+
+# NeoPixel setup
+NUM_LEDS = 16
+np = neopixel.NeoPixel(Pin(4), NUM_LEDS)
+
+# Buttons Input with pull-up (active low)
+btn_next = Pin(2, Pin.IN, Pin.PULL_UP)
+btn_select = Pin(3, Pin.IN, Pin.PULL_UP)
+
+# Simulation scaling factors
+VOLTAGE_MAX = 300
+CURRENT_MAX = 15
+
+# Alert thresholds
+VOLTAGE_LIMIT = 240
+CURRENT_LIMIT = 10
+
+# Variables for button debouncing and states
+last_next_state = 1
+last_select_state = 1
+last_debounce_time = 0
+debounce_delay = 200  # ms
+
+# Log viewing control
+show_logs = False
+
+# New additions for cycling display screens
+screen_index = 0  # 0=Main, 1=Logs, 2=Tariff
+
+logs = [
+    "12-May-2025 10:05: Logged Start",
+    "12-May-2025 12:30: Peak Load",
+    "12-May-2025 15:00: Normal Operation"
+]
+
+TARIFF_RATE = 7.5  # Rs per kWh
+
+def buzzer_on():
+    buzzer_pwm.freq(1000)
+    buzzer_pwm.duty_u16(32768)
+
+def buzzer_off():
+    buzzer_pwm.duty_u16(0)
+
+def read_buttons():
+    global last_next_state, last_select_state, last_debounce_time, show_logs, screen_index
+    current_time = time.ticks_ms()
+    
+    next_state = btn_next.value()
+    select_state = btn_select.value()
+    
+    if next_state != last_next_state:
+        last_debounce_time = current_time
+    if (current_time - last_debounce_time) > debounce_delay:
+        if next_state == 0 and last_next_state == 1:
+            # Cycle screen index on Next button press
+            screen_index = (screen_index + 1) % 3
+    
+    if select_state != last_select_state:
+        last_debounce_time = current_time
+    if (current_time - last_debounce_time) > debounce_delay:
+        if select_state == 0 and last_select_state == 1:
+            print("Select Button Pressed")
+    
+    last_next_state = next_state
+    last_select_state = select_state
+
+def np_on():  # Turn all NeoPixels red (normal state)
+    for i in range(NUM_LEDS):
+        np[i] = (255, 0, 0)
+    np.write()
+
+def np_off():  # Turn off all NeoPixels
+    for i in range(NUM_LEDS):
+        np[i] = (0, 0, 0)
+    np.write()
+
+while True:
+    raw_voltage = voltage_adc.read_u16()
+    raw_current = current_adc.read_u16()
+    
+    voltage = (raw_voltage / 65535.0) * VOLTAGE_MAX
+    current = (raw_current / 65535.0) * CURRENT_MAX
+    power = voltage * current
+
+    alert = False
+    if voltage > VOLTAGE_LIMIT or current > CURRENT_LIMIT:
+        alert = True
+
+    read_buttons()
+
+    print("Voltage: {:.1f} V | Current: {:.2f} A | Power: {:.2f} W".format(voltage, current, power))
+    if alert:
+        print("ALERT: Voltage or Current too high!")
+
+    if alert:
+        buzzer_on()
+        led.value(1)
+        relay.value(0)   # Relay OFF → LED ring OFF
+        np_off()         # Turn NeoPixels off
+    else:
+        buzzer_off()
+        led.value(0)
+        relay.value(1)   # Relay ON → LED ring ON
+        np_on()          # Turn NeoPixels red
+
+    oled.fill(0)
+    if alert:
+        oled.text("!!! ALERT !!!", 15, 10)
+        oled.text("Voltage or Current", 0, 30)
+        oled.text("Too High!", 30, 45)
+    else:
+        if screen_index == 0:
+            oled.text("Smart Energy Meter", 0, 0)
+            oled.text("V: {:.1f}V".format(voltage), 0, 16)
+            oled.text("I: {:.2f}A".format(current), 0, 32)
+            oled.text("P: {:.2f}W".format(power), 0, 48)
+        elif screen_index == 1:
+            oled.text("Logs:", 0, 0)
+            for i, log in enumerate(logs):
+                oled.text(log[:21], 0, 16 + i*16)
+        elif screen_index == 2:
+            power_kw = power / 1000.0
+            cost_per_hour = power_kw * TARIFF_RATE
+            oled.text("Tariff Rate:", 0, 0)
+            oled.text("Rs {:.2f} / kWh".format(TARIFF_RATE), 0, 16)
+            oled.text("Cost/hr:", 0, 32)
+            oled.text("Rs {:.2f}".format(cost_per_hour), 0, 48)
+    
+    if show_logs:
+        oled.text("LOGS VIEW ACTIVE", 0, 56)
+    oled.show()
+
+    time.sleep(0.5)
+
